@@ -352,6 +352,7 @@ class View:
         self._menu_col = 0
         self._menu_settings = load_settings()
         self._available_launchers = discover_launchers()
+        self._launcher_idx = 0
         # Sync deauth from agent config
         if agent and hasattr(agent, '_config'):
             self._menu_settings['deauth_enabled'] = agent._config.get('personality', {}).get('deauth', True)
@@ -360,12 +361,15 @@ class View:
 
     def _get_bottom_items(self):
         """Build list of bottom menu items (action label, return value).
-        Launchers are auto-discovered from launch_*.sh files."""
+        Launchers are shown as a single toggle item (LEFT/RIGHT cycles)."""
         items = [
             ('Back to Pagergotchi', 'resume'),
             ('Exit to Main Menu', 'main_menu'),
         ]
-        for title, path in getattr(self, '_available_launchers', []):
+        launchers = getattr(self, '_available_launchers', [])
+        if launchers:
+            idx = getattr(self, '_launcher_idx', 0) % len(launchers)
+            title, path = launchers[idx]
             items.append((f'Exit to {title}', ('launch', path)))
         items.append(('Exit Pagergotchi', 'exit'))
         return items
@@ -401,10 +405,26 @@ class View:
             if self._menu_row < 3 and self._menu_col != 0:
                 self._menu_col = 0
                 self._partial_redraw_menu([(old_row, 1), (self._menu_row, 0)])
+            elif self._menu_row >= 3:
+                launchers = getattr(self, '_available_launchers', [])
+                if len(launchers) > 1:
+                    idx = self._menu_row - 3
+                    bottom_items = self._get_bottom_items()
+                    if idx < len(bottom_items) and isinstance(bottom_items[idx][1], tuple) and bottom_items[idx][1][0] == 'launch':
+                        self._launcher_idx = (getattr(self, '_launcher_idx', 0) - 1) % len(launchers)
+                        self._partial_redraw_menu([(self._menu_row, 0)])
         elif button == Pager.BTN_RIGHT:
             if self._menu_row < 3 and self._menu_col != 1:
                 self._menu_col = 1
                 self._partial_redraw_menu([(old_row, 0), (self._menu_row, 1)])
+            elif self._menu_row >= 3:
+                launchers = getattr(self, '_available_launchers', [])
+                if len(launchers) > 1:
+                    idx = self._menu_row - 3
+                    bottom_items = self._get_bottom_items()
+                    if idx < len(bottom_items) and isinstance(bottom_items[idx][1], tuple) and bottom_items[idx][1][0] == 'launch':
+                        self._launcher_idx = (getattr(self, '_launcher_idx', 0) + 1) % len(launchers)
+                        self._partial_redraw_menu([(self._menu_row, 0)])
         elif button == Pager.BTN_A:  # Green = Select / cycle value
             row, col = self._menu_row, self._menu_col
             if row < 3:
