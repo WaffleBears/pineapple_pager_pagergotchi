@@ -5,6 +5,7 @@ Uses libpagerctl.so for fast native rendering
 
 import json
 import os
+import re
 import sys
 import subprocess
 import time
@@ -249,6 +250,9 @@ class StartupMenu:
         self.deauth_enabled = self.settings.get('deauth_enabled', True)
         self.privacy_mode = self.settings.get('privacy_mode', False)
 
+        self.iface_choice = 'auto'
+        self._iface_labels = [('auto', 'Auto'), ('builtin', 'Built-in'), ('mk7ac', 'MK7AC')]
+
         # Load whitelist and blacklist (new format with BSSID)
         # Format: [{"ssid": "name", "bssid": "XX:XX:XX:XX:XX:XX"}, ...]
         self.whitelist = self.settings.get('whitelist', [])
@@ -268,7 +272,7 @@ class StartupMenu:
         try:
             with open(self.config_path, 'r') as f:
                 for line in f:
-                    if line.strip().startswith('ssids'):
+                    if re.match(r'\s*ssids\s*=', line):
                         parts = line.split('=', 1)
                         if len(parts) > 1:
                             ssids = parts[1].strip()
@@ -297,24 +301,6 @@ class StartupMenu:
         self.settings['deauth_enabled'] = self.deauth_enabled
         save_settings(self.settings)
 
-        # Also save to config file for compatibility
-        try:
-            ssids = [e.get('ssid', '') for e in self.whitelist if e.get('ssid')]
-            with open(self.config_path, 'r') as f:
-                lines = f.readlines()
-            with open(self.config_path, 'w') as f:
-                found_ssids = False
-                for line in lines:
-                    if line.strip().startswith('ssids'):
-                        f.write(f"ssids = {', '.join(ssids)}\n")
-                        found_ssids = True
-                    else:
-                        f.write(line)
-                if not found_ssids and ssids:
-                    f.write(f"\n[whitelist]\nssids = {', '.join(ssids)}\n")
-        except:
-            pass
-
     def scan_networks(self):
         """Scan for nearby WiFi networks using PineAP, returns list of {ssid, bssid} dicts"""
         networks = []
@@ -326,9 +312,10 @@ class StartupMenu:
                 ['_pineap', 'RECON', 'APS', 'limit=50', 'format=json'],
                 capture_output=True, text=True, timeout=10
             )
-            if result.returncode == 0 and result.stdout.strip():
+            out = result.stdout.strip() or result.stderr.strip()
+            if out:
                 try:
-                    data = json.loads(result.stdout)
+                    data = json.loads(out)
                     aps_list = data if isinstance(data, list) else data.get('aps', data.get('data', []))
                     for ap in aps_list:
                         bssid = ap.get('mac', ap.get('bssid', ''))
@@ -439,40 +426,56 @@ class StartupMenu:
             self.config['personality'] = {}
         self.config['personality']['deauth'] = self.deauth_enabled
 
+    def _iface_label(self):
+        for key, lab in self._iface_labels:
+            if key == self.iface_choice:
+                return lab
+        return 'Auto'
+
+    def _cycle_iface(self, direction):
+        keys = [k for k, _ in self._iface_labels]
+        try:
+            idx = keys.index(self.iface_choice)
+        except ValueError:
+            idx = 0
+        idx = (idx + (1 if direction == 'RIGHT' else -1)) % len(keys)
+        self.iface_choice = keys[idx]
+
     def _draw_main_menu(self, selected, options):
-        """Draw the main menu"""
         theme = get_menu_theme()
         self.gfx.clear(theme['bg'])
-
-        # Title using TTF font - larger and centered
         self.gfx.draw_ttf_centered(0, "PagerGotchi", theme['title'], FONT_LOVEDAYS, 62.0)
 
-        # Menu options - centered vertically
         y = 68
         for i, opt in enumerate(options):
-            is_toggle = opt.startswith('Privacy:') or opt.startswith('WiGLE:') or opt.startswith('Log APs:')
+            label = None
+            value = None
+            value_color = None
+            max_value = "OFF"
 
-            if is_toggle:
-                # Handle toggle options - use fixed label position so it doesn't shift
-                if opt.startswith('Privacy:'):
-                    label = "Privacy:"
-                    value = "ON" if self.privacy_mode else "OFF"
-                    value_color = theme['on'] if self.privacy_mode else theme['off']
-                elif opt.startswith('WiGLE:'):
-                    label = "WiGLE:"
-                    value = "Yes" if self.wigle_enabled else "No"
-                    value_color = theme['on'] if self.wigle_enabled else theme['off']
-                else:
-                    label = "Log APs:"
-                    value = "Yes" if self.log_aps_enabled else "No"
-                    value_color = theme['on'] if self.log_aps_enabled else theme['off']
+            if opt == 'Interface:':
+                label = "Interface:"
+                value = self._iface_label()
+                value_color = theme['accent']
+                max_value = "Built-in"
+            elif opt == 'Privacy:':
+                label = "Privacy:"
+                value = "ON" if self.privacy_mode else "OFF"
+                value_color = theme['on'] if self.privacy_mode else theme['off']
+            elif opt == 'WiGLE:':
+                label = "WiGLE:"
+                value = "Yes" if self.wigle_enabled else "No"
+                value_color = theme['on'] if self.wigle_enabled else theme['off']
+            elif opt == 'Log APs:':
+                label = "Log APs:"
+                value = "Yes" if self.log_aps_enabled else "No"
+                value_color = theme['on'] if self.log_aps_enabled else theme['off']
 
+            if label is not None:
                 label_color = theme['selected'] if i == selected else theme['unselected']
-                # Use widest possible value ("OFF") to calculate fixed position
-                max_value = "OFF"
                 label_width = self.gfx.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
                 max_value_width = self.gfx.ttf_width(max_value, FONT_DEJAVU, TTF_MEDIUM)
-                total_width = label_width + 8 + max_value_width  # 8px gap between label and value
+                total_width = label_width + 8 + max_value_width
                 start_x = (480 - total_width) // 2
                 self.gfx.draw_ttf(start_x, y + 6, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
                 self.gfx.draw_ttf(start_x + label_width + 8, y + 6, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
@@ -491,6 +494,7 @@ class StartupMenu:
         selected = 0
         options = [
             'Start Pagergotchi',
+            'Interface:',
             'Deauth Scope',
             'Privacy:',
             'WiGLE:',
@@ -510,50 +514,54 @@ class StartupMenu:
                 selected = (selected + 1) % len(options)
                 self._draw_main_menu(selected, options)
             elif btn in ['LEFT', 'RIGHT']:
-                # Handle toggles
-                if selected == 2:  # Privacy toggle
+                if selected == 1:
+                    self._cycle_iface(btn)
+                    self._draw_main_menu(selected, options)
+                elif selected == 3:
                     self.privacy_mode = not self.privacy_mode
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif selected == 3:  # WiGLE toggle
+                elif selected == 4:
                     self.wigle_enabled = not self.wigle_enabled
                     if self.wigle_enabled:
                         self.log_aps_enabled = True
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif selected == 4:  # Log APs toggle
+                elif selected == 5:
                     self.log_aps_enabled = not self.log_aps_enabled
                     if not self.log_aps_enabled:
                         self.wigle_enabled = False
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
             elif btn == 'SELECT':
-                if selected == 0:  # Start
+                if selected == 0:
                     return True
-                elif selected == 1:  # Deauth Scope
+                elif selected == 1:
+                    self._cycle_iface('RIGHT')
+                    self._draw_main_menu(selected, options)
+                elif selected == 2:
                     self.show_deauth_scope_menu()
                     self._draw_main_menu(selected, options)
-                elif selected == 2:  # Privacy toggle
+                elif selected == 3:
                     self.privacy_mode = not self.privacy_mode
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif selected == 3:  # WiGLE toggle
+                elif selected == 4:
                     self.wigle_enabled = not self.wigle_enabled
                     if self.wigle_enabled:
                         self.log_aps_enabled = True
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif selected == 4:  # Log APs toggle
+                elif selected == 5:
                     self.log_aps_enabled = not self.log_aps_enabled
                     if not self.log_aps_enabled:
                         self.wigle_enabled = False
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif selected == 5:  # Clear History
+                elif selected == 6:
                     self.clear_history_confirm()
                     self._draw_main_menu(selected, options)
             elif btn == 'BACK':
-                # Show exit confirmation dialog
                 if self._show_exit_confirm():
                     return False
                 self._draw_main_menu(selected, options)
@@ -1049,8 +1057,10 @@ def save_settings(settings):
     try:
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR)
-        with open(SETTINGS_FILE, 'w') as f:
+        tmp = SETTINGS_FILE + '.tmp'
+        with open(tmp, 'w') as f:
             json.dump(settings, f)
+        os.replace(tmp, SETTINGS_FILE)
     except Exception:
         pass
 

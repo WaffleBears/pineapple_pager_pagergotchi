@@ -6,7 +6,10 @@ A port of [Pwnagotchi](https://github.com/jayofelern/pwnagotchi) for the Hak5 Wi
 
 ## Features
 
-- **Automated WiFi Handshake Capture** - PMKID and 4-way handshake attacks via pineapd
+- **Automated WiFi Handshake Capture** - 4-way handshake (deauth + dwell) via pineapd
+- **Active PMKID Capture** - Clientless PMKID via hcxdumptool on a second radio (on by default when available)
+- **Interface Selection** - Choose the capture radio at startup: Auto, Built-in (wlan1mon), or MK7AC (wlan2mon)
+- **Dual-Radio Mode** - With the Hak5 MK7AC attached, runs 4-way capture on the built-in radio and PMKID on the MK7AC at the same time
 - **Cute ASCII Pet** - Personality-driven face that reacts to activity
 - **Native Display** - Fast C library rendering via libpagerctl.so (480x222 RGB565)
 - **Non-Blocking Pause Menu** - Two-column settings layout with 2D navigation; attacks continue in background
@@ -48,11 +51,24 @@ The startup menu provides these options:
 ![Startup Menu](screenshots/mainmenu.png)
 
 - **Start Pagergotchi** - Begin automated operation
+- **Interface** - Capture radio: Auto / Built-in / MK7AC (LEFT/RIGHT to cycle; resets to Auto every launch)
 - **Deauth Scope** - Configure whitelist/blacklist
 - **Privacy** - Toggle display obfuscation (ON/OFF)
 - **WiGLE** - Toggle WiGLE CSV logging (ON/OFF)
 - **Log APs** - Toggle AP discovery logging (ON/OFF)
 - **Clear History** - Reset attack tracking for all networks
+
+### Interface Selection
+
+The **Interface** option chooses which radio drives capture. It always starts at **Auto** each launch and is not saved between sessions.
+
+| Option | Capture (recon + 4-way) | PMKID (hcxdumptool) |
+|--------|--------------------------|---------------------|
+| **Auto** | Built-in `wlan1mon` | MK7AC `wlan2mon` if attached, otherwise none |
+| **Built-in** | Built-in `wlan1mon` only | Off |
+| **MK7AC** | MK7AC `wlan2mon` (falls back to built-in if unplugged) | Built-in `wlan1mon` |
+
+PMKID requires a second monitor-capable radio (it cannot share a radio with pineapd), so it runs only when one is free. The Hak5 MK7AC appears automatically as `wlan2mon` when plugged in. If a selected adapter is missing, Pagergotchi shows a warning and falls back to the built-in radio.
 
 ![Clear History](screenshots/clear-history.png)
 
@@ -262,6 +278,8 @@ Edit `config.conf` for persistent settings:
 debug = false
 
 [capture]
+# The capture radio is chosen from the on-screen Interface menu (Auto/Built-in/MK7AC)
+# each launch. This value is only a fallback default.
 interface = wlan1mon
 
 [channels]
@@ -316,7 +334,7 @@ pagergotchi/
 ├── bin/                    # Capture tools
 └── pwnagotchi_port/        # Main Python module
     ├── main.py             # Entry point, button monitor thread, main loop
-    ├── agent.py            # AI brain & attack logic
+    ├── agent.py            # Attack logic & handshake/PMKID capture
     └── ui/
         ├── view.py         # Display rendering, pause menu, auto-dim
         ├── menu.py         # Startup menu, themes, settings persistence
@@ -341,10 +359,10 @@ pagergotchi/
 - Debounced input with edge detection
 
 ### Attacks
-- PMKID capture via association frames
-- Deauth for 4-way handshake capture
-- Per-AP throttling to avoid detection
-- Attack history prevents repeated attempts
+- Active PMKID capture via hcxdumptool on a dedicated radio (when available)
+- Broadcast/targeted deauth per AP, followed by an on-channel dwell to catch the reconnect handshake
+- PMKID is attempted on every AP; deauth is per-AP interaction-limited
+- Attack history prevents repeated deauth on already-captured networks
 
 ### Architecture
 - **Button monitor thread** - Polls hardware input at 16ms, handles menu navigation
@@ -357,6 +375,8 @@ pagergotchi/
 - Hak5 WiFi Pineapple Pager
 - Python3 with ctypes (auto-installed if missing)
 - Monitor mode capable WiFi adapter (built-in wlan1)
+- Optional: Hak5 MK7AC USB adapter (appears as wlan2mon) for dual-radio + active PMKID
+- hcxdumptool (bundled on the Pager) for active PMKID capture
 
 ## Credits
 

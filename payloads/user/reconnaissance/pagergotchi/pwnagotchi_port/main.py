@@ -180,59 +180,52 @@ def do_auto_mode(agent):
             # Button monitor thread handles menu input
             # View draws menu overlay when _menu_active is True
 
-            # recon on all channels
-            logging.debug("[LOOP] Starting recon phase...")
             agent.recon()
 
             if should_exit() or should_return_to_menu():
                 break
 
-            # get nearby access points grouped by channel
             channels = agent.get_access_points_by_channel()
-            logging.debug("[LOOP] Found %d channels with APs", len(channels))
+            min_rssi = agent._config['main'].get('min_attack_rssi', -85)
+            dwell_time = agent._config['personality'].get('dwell_time', 4)
 
-            # for each channel
             for ch, aps in channels:
                 if should_exit() or should_return_to_menu():
                     break
 
-                time.sleep(1)
-                logging.debug("[LOOP] Setting channel %d (%d APs)", ch, len(aps))
                 agent.set_channel(ch)
+                attacked = False
 
-                if not agent.is_stale() and agent.any_activity():
-                    logging.info("%d access points on channel %d" % (len(aps), ch))
-
-                # for each ap on this channel
                 for ap in aps:
                     if should_exit() or should_return_to_menu():
                         break
 
-                    hostname = ap.get('hostname', ap.get('mac', 'unknown'))
+                    if ap.get('rssi', -100) < min_rssi:
+                        continue
 
-                    # send an association frame in order to get for a PMKID
-                    logging.debug("[ATTACK] Associating with %s", hostname)
                     agent.associate(ap)
 
-                    # deauth all client stations in order to get a full handshake
-                    # (original behavior: only targeted deauth, skip if no clients)
                     clients = ap.get('clients', [])
                     if clients:
-                        logging.debug("[ATTACK] Deauthing %d clients from %s", len(clients), hostname)
                         for sta in clients:
                             if should_exit() or should_return_to_menu():
                                 break
                             agent.deauth(ap, sta)
+                            attacked = True
+                    else:
+                        agent.broadcast_deauth(ap)
+                        attacked = True
+
+                if attacked and not should_exit() and not should_return_to_menu():
+                    agent.dwell(ch, dwell_time)
 
             if should_exit() or should_return_to_menu():
                 break
 
-            # End of epoch
-            logging.debug("[LOOP] Epoch complete, calling next_epoch()")
             agent.next_epoch()
 
         except Exception as e:
-            if str(e).find("wifi.interface not set") > 0:
+            if str(e).find("wifi.interface not set") >= 0:
                 logging.exception("main loop exception due to unavailable wifi device (%s)", e)
                 logging.info("sleeping 60 seconds then advancing to next epoch")
                 time.sleep(60)
@@ -255,6 +248,11 @@ def load_config(config_path=None):
         'main': {
             'name': 'pagergotchi',
             'iface': 'wlan1mon',
+            'pineapd_iface': 'wlan1mon',
+            'pmkid_iface': None,
+            'iface_choice': 'auto',
+            'pmkid_active': True,
+            'min_attack_rssi': -85,
             'mon_start_cmd': '',
             'no_restart': True,
             'whitelist': [],
@@ -266,6 +264,7 @@ def load_config(config_path=None):
             'recon_inactive_multiplier': 2,
             'hop_recon_time': 10,
             'min_recon_time': 5,
+            'dwell_time': 4,
             # Attacks
             'associate': True,
             'deauth': True,
@@ -378,18 +377,28 @@ def main():
         from pwnagotchi_port.ui.menu import StartupMenu
         startup_menu = StartupMenu(config)
 
+        proceed = False
+        iface_choice = 'auto'
         try:
-            if not startup_menu.show_main_menu():
-                logging.info("User chose to exit from menu")
-                startup_menu.cleanup()
-                return 0
+            proceed = startup_menu.show_main_menu()
+            iface_choice = getattr(startup_menu, 'iface_choice', 'auto')
         finally:
             startup_menu.cleanup()
 
-        # Reload config in case whitelist changed
-        config = load_config(config_path)
+        if not proceed:
+            logging.info("User chose to exit from menu")
+            return 0
 
-        # Create display/view
+        config = load_config(config_path)
+        res = utils.resolve_interfaces(iface_choice, config['main'].get('pmkid_active', True))
+        config['main']['iface_choice'] = iface_choice
+        config['main']['pineapd_iface'] = res['pineapd']
+        config['main']['pmkid_iface'] = res['pmkid']
+        config['main']['iface'] = res['pineapd']
+        config['main']['iface_warning'] = res['warning']
+        if res['warning']:
+            logging.warning("interface: %s", res['warning'])
+
         view = View(config)
 
         # Create agent

@@ -48,11 +48,19 @@ class State(object):
                     changes.append(change)
             return changes
 
+    def get_and_clear_changes(self, ignore=()):
+        with self._lock:
+            changes = [c for c in self._changes.keys() if c not in ignore]
+            self._changes = {}
+            return changes
+
     def has_changes(self):
         with self._lock:
             return len(self._changes) > 0
 
     def set(self, key, value):
+        cb = None
+        args = None
         with self._lock:
             if key in self._state:
                 prev = self._state[key].value
@@ -61,4 +69,7 @@ class State(object):
                 if prev != value:
                     self._changes[key] = True
                     if key in self._listeners and self._listeners[key] is not None:
-                        self._listeners[key](prev, value)
+                        cb = self._listeners[key]
+                        args = (prev, value)
+        if cb is not None:
+            cb(*args)

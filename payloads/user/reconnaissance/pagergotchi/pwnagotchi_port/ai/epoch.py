@@ -69,6 +69,7 @@ class Epoch(object):
         self._epoch_data = {}
         self._epoch_data_ready = threading.Event()
         self._reward = RewardFunction()
+        self._lock = threading.Lock()
 
     def wait_for_epoch_data(self, with_observation=True, timeout=None):
         self._epoch_data_ready.wait(timeout)
@@ -123,30 +124,31 @@ class Epoch(object):
         self._observation_ready.set()
 
     def track(self, deauth=False, assoc=False, handshake=False, hop=False, sleep=False, miss=False, inc=1):
-        if deauth:
-            self.num_deauths += inc
-            self.did_deauth = True
-            self.any_activity = True
+        with self._lock:
+            if deauth:
+                self.num_deauths += inc
+                self.did_deauth = True
+                self.any_activity = True
 
-        if assoc:
-            self.num_assocs += inc
-            self.did_associate = True
-            self.any_activity = True
+            if assoc:
+                self.num_assocs += inc
+                self.did_associate = True
+                self.any_activity = True
 
-        if miss:
-            self.num_missed += inc
+            if miss:
+                self.num_missed += inc
 
-        if hop:
-            self.num_hops += inc
-            self.did_deauth = False
-            self.did_associate = False
+            if hop:
+                self.num_hops += inc
+                self.did_deauth = False
+                self.did_associate = False
 
-        if handshake:
-            self.num_shakes += inc
-            self.did_handshakes = True
+            if handshake:
+                self.num_shakes += inc
+                self.did_handshakes = True
 
-        if sleep:
-            self.num_slept += inc
+            if sleep:
+                self.num_slept += inc
 
     def next(self):
         if self.any_activity is False and self.did_handshakes is False:
@@ -219,18 +221,19 @@ class Epoch(object):
                          mem * 100,
                          temp))
 
-        self.epoch += 1
-        self.epoch_started = now
-        self.did_deauth = False
-        self.num_deauths = 0
-        self.num_peers = 0
-        self.tot_bond_factor = 0.0
-        self.avg_bond_factor = 0.0
-        self.did_associate = False
-        self.num_assocs = 0
-        self.num_missed = 0
-        self.did_handshakes = False
-        self.num_shakes = 0
-        self.num_hops = 0
-        self.num_slept = 0
-        self.any_activity = False
+        with self._lock:
+            self.epoch += 1
+            self.epoch_started = now
+            self.did_deauth = False
+            self.num_deauths = 0
+            self.num_peers = 0
+            self.tot_bond_factor = 0.0
+            self.avg_bond_factor = 0.0
+            self.did_associate = False
+            self.num_assocs = 0
+            self.num_missed = 0
+            self.did_handshakes = False
+            self.num_shakes = 0
+            self.num_hops = 0
+            self.num_slept = 0
+            self.any_activity = False

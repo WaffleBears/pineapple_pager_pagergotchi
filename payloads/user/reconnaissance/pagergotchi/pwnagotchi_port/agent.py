@@ -51,6 +51,9 @@ class Agent(Client, Automata, AsyncAdvertiser):
         Automata.__init__(self, config, view)
         AsyncAdvertiser.__init__(self, config, view, keypair)
 
+        self.set_interfaces(config['main'].get('pineapd_iface', 'wlan1mon'),
+                            config['main'].get('pmkid_iface', None))
+
         self._started_at = time.time()
         self._current_channel = 0
         self._tot_aps = 0
@@ -58,16 +61,17 @@ class Agent(Client, Automata, AsyncAdvertiser):
         self._supported_channels = utils.iface_channels(config['main']['iface'])
         self._view = view
         self._view.set_agent(self)
-        # Removed: self._web_ui = Server(self, config['ui']) (no web UI on Pager)
 
         self._access_points = []
         self._last_pwnd = None
         self._history = {}
         self._handshakes = {}
-        self._session_handshakes = 0  # Handshakes captured this session
-        self._last_total_handshakes = 0  # For detecting new handshakes
-        self._known_handshake_files = set()  # Track seen files directly
-        self._pineap_handshakes_dir = '/root/loot/handshakes'  # PineAP saves here (not config path!)
+        self._session_handshakes = 0
+        self._known_capture_keys = set()
+        self._pineap_handshakes_dir = '/root/loot/handshakes'
+        self._state_lock = threading.RLock()
+        self._stop = threading.Event()
+        self._loop_ref = None
         self.last_session = LastSession(self._config)
         self.mode = 'auto'
 
@@ -135,40 +139,22 @@ class Agent(Client, Automata, AsyncAdvertiser):
 
     def start_monitor_mode(self):
         mon_iface = self._config['main']['iface']
-        mon_start_cmd = self._config['main'].get('mon_start_cmd', '')
-        restart = not self._config['main'].get('no_restart', False)
-        has_mon = False
-
-        while has_mon is False:
-            s = self.session()
-            for iface in s.get('interfaces', []):
-                if iface['name'] == mon_iface:
-                    logging.info("found monitor interface: %s", iface['name'])
-                    has_mon = True
-                    break
-
-            if has_mon is False:
-                if mon_start_cmd is not None and mon_start_cmd != '':
-                    logging.info("starting monitor interface ...")
-                    self.run('!%s' % mon_start_cmd)
-                else:
-                    logging.info("waiting for monitor interface %s ...", mon_iface)
-                    time.sleep(1)
-                # Changed: on Pager, assume interface is ready after first check
-                has_mon = True
+        if not utils.iface_exists(mon_iface):
+            logging.error("capture interface %s does not exist", mon_iface)
+            self._view.set('status', '%s missing!' % mon_iface)
+        elif not utils.iface_is_monitor(mon_iface):
+            logging.error("capture interface %s not in monitor mode", mon_iface)
+            self._view.set('status', '%s not monitor!' % mon_iface)
 
         logging.info("supported channels: %s", self._supported_channels)
-        logging.info("handshakes will be collected inside %s", self._config['bettercap']['handshakes'])
+        logging.info("handshakes will be collected inside %s", self._pineap_handshakes_dir)
 
         self._reset_wifi_settings()
 
-        wifi_running = self.is_module_running('wifi')
-        if wifi_running and restart:
-            logging.debug("restarting wifi module ...")
+        if self.is_module_running('wifi'):
             self.restart_module('wifi.recon')
             self.run('wifi.clear')
-        elif not wifi_running:
-            logging.debug("starting wifi module ...")
+        else:
             self.start_module('wifi.recon')
 
         self.start_advertising()
@@ -185,12 +171,13 @@ class Agent(Client, Automata, AsyncAdvertiser):
         self._wait_bettercap()
         self.setup_events()
         self.set_starting()
-        time.sleep(3)  # Show startup message for 3 seconds
+        warn = self._config['main'].get('iface_warning')
+        if warn:
+            self._view.set('status', warn)
+        time.sleep(3)
         self.start_monitor_mode()
-        # Initialize known handshakes from directory so we only track NEW ones this session
-        pattern = os.path.join(self._pineap_handshakes_dir, '*.22000')
-        self._known_handshake_files = set(glob(pattern))
-        logging.info(f"[agent] Starting with {len(self._known_handshake_files)} existing handshakes")
+        self._known_capture_keys = set(utils.scan_handshake_captures(self._pineap_handshakes_dir).keys())
+        logging.info("[agent] starting with %d existing captures", len(self._known_capture_keys))
         self.start_event_polling()
         self.start_session_fetcher()
         # Start GPS (optional - no error if not available)
@@ -347,34 +334,23 @@ class Agent(Client, Automata, AsyncAdvertiser):
             self._view.set('aps', '%d (%d)' % (self._aps_on_channel, self._tot_aps))
 
     def _check_handshakes_direct(self):
-        """Directly scan handshake directory for new files"""
-        # Find all .22000 files
-        pattern = os.path.join(self._pineap_handshakes_dir, '*.22000')
-        current_files = set(glob(pattern))
-
-        # Find new files (files we haven't seen before)
-        new_files = current_files - self._known_handshake_files
-        new_count = len(new_files)
-
-        # Always update known files set to keep total count accurate
-        self._known_handshake_files = current_files
+        captures = utils.scan_handshake_captures(self._pineap_handshakes_dir)
+        current_keys = set(captures.keys())
+        new_keys = current_keys - self._known_capture_keys
+        self._known_capture_keys = current_keys
+        new_count = len(new_keys)
 
         if new_count > 0:
-
-            # Get SSID from newest file (by modification time)
-            newest_file = max(new_files, key=os.path.getmtime)
-            essid = self._extract_essid_from_file(newest_file)
-            if essid:
-                self._last_pwnd = essid
-                logging.info(f"[agent] New handshake captured: {essid}")
-            else:
-                # Try to get MAC from filename
-                filename = os.path.basename(newest_file)
-                mac_match = re.search(r'_([0-9A-Fa-f]{12})_', filename)
-                if mac_match:
-                    raw_mac = mac_match.group(1)
-                    self._last_pwnd = ':'.join(raw_mac[i:i+2] for i in range(0, 12, 2))
-                logging.info(f"[agent] New handshake captured: {self._last_pwnd or 'unknown'}")
+            chosen = None
+            for k in new_keys:
+                rec = captures[k]
+                if rec.get('essid'):
+                    chosen = rec
+                    break
+            if chosen is None:
+                chosen = captures[next(iter(new_keys))]
+            self._last_pwnd = chosen.get('essid') or chosen.get('ap')
+            logging.info("[agent] new capture: %s", self._last_pwnd)
 
         return new_count
 
@@ -400,9 +376,7 @@ class Agent(Client, Automata, AsyncAdvertiser):
             self._epoch.track(handshake=True, inc=new_shakes)
             self._session_handshakes += new_shakes
 
-        # Total = number of .22000 files in handshakes directory
-        total_known = len(self._known_handshake_files)
-        # Display: session_captures (total_known)
+        total_known = len(self._known_capture_keys)
         txt = '%d (%d)' % (self._session_handshakes, total_known)
 
         if self._last_pwnd is not None and self._session_handshakes > 0:
@@ -437,14 +411,15 @@ class Agent(Client, Automata, AsyncAdvertiser):
     def _save_recovery_data(self):
         logging.warning("writing recovery data to %s ...", RECOVERY_DATA_FILE)
         try:
-            with open(RECOVERY_DATA_FILE, 'w') as fp:
+            with self._state_lock:
                 data = {
                     'started_at': self._started_at,
                     'epoch': self._epoch.epoch,
-                    'history': self._history,
-                    'handshakes': self._handshakes,
+                    'history': dict(self._history),
+                    'handshakes': dict(self._handshakes),
                     'last_pwnd': self._last_pwnd
                 }
+            with open(RECOVERY_DATA_FILE, 'w') as fp:
                 json.dump(data, fp)
         except Exception as e:
             logging.error("Failed to save recovery data: %s", e)
@@ -454,11 +429,12 @@ class Agent(Client, Automata, AsyncAdvertiser):
             with open(RECOVERY_DATA_FILE, 'rt') as fp:
                 data = json.load(fp)
                 logging.info("found recovery data: %s", data)
-                self._started_at = data['started_at']
-                self._epoch.epoch = data['epoch']
-                self._handshakes = data['handshakes']
-                self._history = data['history']
-                self._last_pwnd = data['last_pwnd']
+                with self._state_lock:
+                    self._started_at = data['started_at']
+                    self._epoch.epoch = data['epoch']
+                    self._handshakes = data['handshakes']
+                    self._history = data['history']
+                    self._last_pwnd = data['last_pwnd']
 
                 if delete:
                     logging.info("deleting %s", RECOVERY_DATA_FILE)
@@ -515,12 +491,12 @@ class Agent(Client, Automata, AsyncAdvertiser):
             self._view.set('gps', '')
 
     def _fetch_stats(self):
-        while True:
+        while not self._stop.is_set():
             try:
                 s = self.session()
             except Exception as err:
                 logging.debug("[agent:_fetch_stats] self.session: %s" % repr(err))
-                time.sleep(5)
+                self._stop.wait(5)
                 continue
 
             try:
@@ -551,7 +527,7 @@ class Agent(Client, Automata, AsyncAdvertiser):
             except Exception as err:
                 logging.debug("[agent:_fetch_stats] self.update_gps: %s" % repr(err))
 
-            time.sleep(5)
+            self._stop.wait(5)
 
     async def _on_event(self, msg):
         found_handshake = False
@@ -573,8 +549,11 @@ class Agent(Client, Automata, AsyncAdvertiser):
             # PineAP backend extracts ESSID from .22000 file and provides it as ap_name
             ap_name_from_file = jmsg['data'].get('ap_name', '')
             key = "%s -> %s" % (sta_mac, ap_mac)
-            if key not in self._handshakes:
-                self._handshakes[key] = jmsg
+            with self._state_lock:
+                is_new = key not in self._handshakes
+                if is_new:
+                    self._handshakes[key] = jmsg
+            if is_new:
                 s = self.session()
                 ap_and_station = self._find_ap_sta_in(sta_mac, ap_mac, s)
                 if ap_and_station is None:
@@ -598,23 +577,24 @@ class Agent(Client, Automata, AsyncAdvertiser):
                         self._last_pwnd, ap['mac'], ap.get('vendor', ''))
                     plugins.on('handshake', self, filename, ap, sta)
                 found_handshake = True
-                # Save GPS coordinates if available
                 if self._gps.available:
                     self._gps.save_coordinates(filename)
-            self._update_handshakes(1 if found_handshake else 0)
+            self._update_handshakes(0)
 
     def _event_poller(self, loop):
+        self._loop_ref = loop
+        asyncio.set_event_loop(loop)
         self._load_recovery_data()
         self.run('events.clear')
-
-        while True:
-            logging.debug("[agent:_event_poller] polling events ...")
+        try:
+            loop.run_until_complete(self.start_websocket(self._on_event))
+        except Exception as ex:
+            logging.debug("[agent:_event_poller] %s", ex)
+        finally:
             try:
-                loop.create_task(self.start_websocket(self._on_event))
-                loop.run_forever()
-                logging.debug("[agent:_event_poller] loop loop loop")
-            except Exception as ex:
-                logging.debug("[agent:_event_poller] Error while polling via websocket (%s)", ex)
+                loop.close()
+            except Exception:
+                pass
 
     def start_event_polling(self):
         threading.Thread(target=self._event_poller, args=(asyncio.new_event_loop(),), name="Event Polling", daemon=True).start()
@@ -633,23 +613,23 @@ class Agent(Client, Automata, AsyncAdvertiser):
         self.run('%s off; %s on' % (module, module))
 
     def _has_handshake(self, bssid):
-        for key in self._handshakes:
-            if bssid.lower() in key:
-                return True
+        b = bssid.lower()
+        with self._state_lock:
+            for key in self._handshakes:
+                if b in key:
+                    return True
         return False
 
-    def _should_interact(self, who):
+    def _should_associate(self, who):
+        return not self._has_handshake(who)
+
+    def _should_deauth(self, who):
         if self._has_handshake(who):
             return False
-
-        elif who not in self._history:
-            self._history[who] = 1
-            return True
-
-        else:
-            self._history[who] += 1
-
-        return self._history[who] < self._config['personality']['max_interactions']
+        with self._state_lock:
+            self._history[who] = self._history.get(who, 0) + 1
+            count = self._history[who]
+        return count <= self._config['personality']['max_interactions']
 
     def _obfuscate_ap(self, ap):
         """Return obfuscated copy of AP dict if privacy mode is on"""
@@ -680,7 +660,7 @@ class Agent(Client, Automata, AsyncAdvertiser):
         if throttle == -1 and "throttle_a" in self._config['personality']:
             throttle = self._config['personality']['throttle_a']
 
-        if self._config['personality']['associate'] and self._should_interact(ap['mac']):
+        if self._config['personality']['associate'] and self._should_associate(ap['mac']):
             self._view.on_assoc(self._obfuscate_ap(ap))
 
             try:
@@ -707,7 +687,7 @@ class Agent(Client, Automata, AsyncAdvertiser):
 
         logging.debug("deauth throttle=%s", throttle)
 
-        if self._config['personality']['deauth'] and self._should_interact(sta['mac']):
+        if self._config['personality']['deauth'] and self._should_deauth(sta['mac']):
             self._view.on_deauth(self._obfuscate_sta(sta))
 
             try:
@@ -732,8 +712,7 @@ class Agent(Client, Automata, AsyncAdvertiser):
         if throttle == -1 and "throttle_d" in self._config['personality']:
             throttle = self._config['personality']['throttle_d']
 
-        if self._config['personality']['deauth'] and self._should_interact(ap['mac']):
-            # Use AP name for display instead of broadcast address
+        if self._config['personality']['deauth'] and self._should_deauth(ap['mac']):
             ap_name = ap.get('hostname') or ap.get('mac', 'unknown')
             fake_sta = {'mac': ap_name, 'vendor': 'broadcast'}
             self._view.on_deauth(self._obfuscate_sta(fake_sta))
@@ -786,14 +765,26 @@ class Agent(Client, Automata, AsyncAdvertiser):
             except Exception as e:
                 logging.error("Error while setting channel (%s)", e)
 
+    def dwell(self, channel, seconds):
+        if seconds <= 0 or not channel:
+            return
+        try:
+            self._ensure_backend().dwell(channel, seconds)
+        except Exception:
+            pass
+        self._sleep_with_exit_check(seconds)
+
     def stop(self):
-        """Stop the agent and cleanup resources"""
         logging.info("Stopping agent...")
-        # Stop AP logger
+        self._stop.set()
         if self._ap_logger:
             self._ap_logger.stop()
-        # Stop GPS
         if self._gps:
             self._gps.stop()
-        # Stop backend (Client.stop)
         Client.stop(self)
+        loop = self._loop_ref
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass

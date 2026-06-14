@@ -11,7 +11,7 @@ import threading
 import logging
 import random
 import time
-from threading import Lock
+from threading import RLock
 
 # Add lib directory to path for pagerctl import
 _lib_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'lib')
@@ -119,9 +119,10 @@ class View:
     def __init__(self, config, impl=None, state=None):
         self._agent = None
         self._config = config
-        self._lock = Lock()
+        self._lock = RLock()
         self._frozen = False
         self._render_cbs = []
+        self._settings_cache = load_settings()
 
         # Log font path for debugging
         logging.info(f"[UI] Font path: {FONT_PATH}")
@@ -175,7 +176,12 @@ class View:
         status_max_chars = available_width // char_width if char_width > 0 else 22
         logging.info(f"[UI] Status wrap: available={available_width}px, char={char_width}px, max_chars={status_max_chars}")
 
-        # Initialize voice
+        _iface = config.get('main', {}).get('pineapd_iface', 'wlan1mon')
+        _radio_tag = 'MK7' if _iface == 'wlan2mon' else 'INT'
+        if config.get('main', {}).get('pmkid_iface'):
+            _radio_tag += '+P'
+        self._name_value = '%s [%s]>' % (pwnagotchi.name(), _radio_tag)
+
         lang = config.get('main', {}).get('lang', 'en')
         self._voice = Voice(lang=lang)
 
@@ -211,7 +217,7 @@ class View:
                                color=0,
                                ttf_font=FONT_PATH,
                                ttf_size=LABEL_TTF_SIZE),
-            'name': Text(value='%s>' % pwnagotchi.name(),
+            'name': Text(value=self._name_value,
                         position=(5, name_y),
                         color=0,
                         ttf_font=FONT_PATH,
@@ -263,19 +269,21 @@ class View:
         self._is_dimmed = False
         self._dim_level = 20
 
-        # Start refresh thread
         self._refresh_stop = False
         self._returning_to_menu = False
+        self._refresh_thread = None
+        self._uptime_thread = None
         fps = config.get('ui', {}).get('fps', 2.0)
         if fps > 0.0:
             self._ignore_changes = ()
-            threading.Thread(target=self._refresh_handler, daemon=True).start()
+            self._refresh_thread = threading.Thread(target=self._refresh_handler, daemon=True)
+            self._refresh_thread.start()
         else:
             self._ignore_changes = ('uptime', 'name')
 
-        # Start dedicated uptime thread for 1-second updates
         self._uptime_stop = False
-        threading.Thread(target=self._uptime_handler, daemon=True).start()
+        self._uptime_thread = threading.Thread(target=self._uptime_handler, daemon=True)
+        self._uptime_thread.start()
 
     def set_agent(self, agent):
         self._agent = agent
@@ -285,9 +293,9 @@ class View:
         self._last_activity_time = time.time()
         if self._is_dimmed:
             self._is_dimmed = False
-            settings = load_settings()
-            brightness = settings.get('brightness', 100)
-            self._display.set_brightness(brightness)
+            brightness = self._settings_cache.get('brightness', 100)
+            with self._lock:
+                self._display.set_brightness(brightness)
             return True
         return False
 
@@ -295,12 +303,12 @@ class View:
         """Dim screen if idle for auto_dim seconds (0=disabled)."""
         if self._is_dimmed:
             return
-        settings = load_settings()
-        timeout = settings.get('auto_dim', 0)
+        timeout = self._settings_cache.get('auto_dim', 0)
         if timeout > 0 and time.time() - self._last_activity_time >= timeout:
             self._is_dimmed = True
-            self._dim_level = settings.get('auto_dim_level', 20)
-            self._display.set_brightness(self._dim_level)
+            self._dim_level = self._settings_cache.get('auto_dim_level', 20)
+            with self._lock:
+                self._display.set_brightness(self._dim_level)
 
     def has_element(self, key):
         return self._state.has_element(key)
@@ -351,6 +359,7 @@ class View:
         self._menu_row = 0
         self._menu_col = 0
         self._menu_settings = load_settings()
+        self._settings_cache = self._menu_settings
         self._available_launchers = discover_launchers()
         self._launcher_idx = 0
         # Sync deauth from agent config
@@ -492,7 +501,8 @@ class View:
                 new_val = 100
 
         self._menu_settings['brightness'] = new_val
-        self._display.set_brightness(new_val)
+        with self._lock:
+            self._display.set_brightness(new_val)
         save_settings(self._menu_settings)
 
     def _cycle_auto_dim(self, button):
@@ -542,7 +552,6 @@ class View:
         return items[row][col]
 
     def _partial_redraw_menu(self, positions):
-        """Redraw only the specified menu positions. Much faster than full redraw."""
         theme = get_menu_theme()
         col_x = [30, 260]
         start_y = 48
@@ -551,38 +560,37 @@ class View:
         bottom_y = start_y + 3 * row_h + 6
         col_w = [col_x[1] - col_x[0], 480 - col_x[1]]
 
-        for r, c in positions:
-            if r < 3:
-                # Column setting item
-                x = col_x[c]
-                y = start_y + r * row_h
-                self._display.fill_rect(x, y, col_w[c], row_h, theme['bg'])
+        with self._lock:
+            for r, c in positions:
+                if r < 3:
+                    x = col_x[c]
+                    y = start_y + r * row_h
+                    self._display.fill_rect(x, y, col_w[c], row_h, theme['bg'])
 
-                label, value = self._get_menu_item_text(r, c)
-                is_sel = (self._menu_row == r and self._menu_col == c)
-                label_color = theme['selected'] if is_sel else theme['unselected']
+                    label, value = self._get_menu_item_text(r, c)
+                    is_sel = (self._menu_row == r and self._menu_col == c)
+                    label_color = theme['selected'] if is_sel else theme['unselected']
 
-                if label in ('Theme:', 'Brightness:', 'Auto Dim:', 'Dim Level:'):
-                    value_color = theme['accent']
+                    if label in ('Theme:', 'Brightness:', 'Auto Dim:', 'Dim Level:'):
+                        value_color = theme['accent']
+                    else:
+                        value_color = theme['on'] if value == 'ON' else theme['off']
+
+                    label_w = self._display.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
+                    self._display.draw_ttf(x, y, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
+                    self._display.draw_ttf(x + label_w + 6, y, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
                 else:
-                    value_color = theme['on'] if value == 'ON' else theme['off']
+                    idx = r - 3
+                    if idx < len(bottom_items):
+                        y = bottom_y + idx * 22
+                        self._display.fill_rect(0, y, 480, 22, theme['bg'])
 
-                label_w = self._display.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
-                self._display.draw_ttf(x, y, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
-                self._display.draw_ttf(x + label_w + 6, y, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
-            else:
-                # Bottom action item
-                idx = r - 3
-                if idx < len(bottom_items):
-                    y = bottom_y + idx * 22
-                    self._display.fill_rect(0, y, 480, 22, theme['bg'])
+                        label = bottom_items[idx][0]
+                        is_sel = (self._menu_row == r)
+                        color = theme['selected'] if is_sel else theme['unselected']
+                        self._display.draw_ttf_centered(y, label, color, FONT_DEJAVU, TTF_MEDIUM)
 
-                    label = bottom_items[idx][0]
-                    is_sel = (self._menu_row == r)
-                    color = theme['selected'] if is_sel else theme['unselected']
-                    self._display.draw_ttf_centered(y, label, color, FONT_DEJAVU, TTF_MEDIUM)
-
-        self._display.flip()
+            self._display.flip()
 
     def _draw_pause_menu(self):
         """Draw pause menu overlay — full redraw (used for init and theme changes)."""
@@ -595,19 +603,12 @@ class View:
         theme = get_menu_theme()
         row, col = self._menu_row, self._menu_col
 
-        self._display.clear(theme['bg'])
-
-        # Title
-        self._display.draw_ttf_centered(10, "PAUSED", theme['warning'], FONT_DEJAVU, TTF_LARGE)
-
-        # --- Column settings (rows 0-2) ---
         current_theme = self._menu_settings.get('theme', 'Default')
         auto_dim_val = self._menu_settings.get('auto_dim', 0)
         auto_dim_str = 'Off' if auto_dim_val == 0 else f'{auto_dim_val}s'
         dim_level = self._menu_settings.get('auto_dim_level', 20)
         dim_level_str = f'{dim_level}%'
 
-        # (left_label, left_value, right_label, right_value)
         col_rows = [
             ('Theme:', current_theme,
              'Brightness:', f"{self._menu_settings.get('brightness', 100)}%"),
@@ -620,34 +621,36 @@ class View:
         col_x = [30, 260]
         start_y = 48
         row_h = 26
-
-        for r, (ll, lv, rl, rv) in enumerate(col_rows):
-            y = start_y + r * row_h
-            for c, (label, value) in enumerate([(ll, lv), (rl, rv)]):
-                x = col_x[c]
-                is_sel = (row == r and col == c)
-                label_color = theme['selected'] if is_sel else theme['unselected']
-
-                if label in ('Theme:', 'Brightness:', 'Auto Dim:', 'Dim Level:'):
-                    value_color = theme['accent']
-                else:
-                    value_color = theme['on'] if value == 'ON' else theme['off']
-
-                label_w = self._display.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
-                self._display.draw_ttf(x, y, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
-                self._display.draw_ttf(x + label_w + 6, y, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
-
-        # --- Bottom action items (rows 3+) ---
         bottom_items = self._get_bottom_items()
         bottom_y = start_y + 3 * row_h + 6
 
-        for i, (label, _action) in enumerate(bottom_items):
-            y = bottom_y + i * 22
-            is_sel = (row == 3 + i)
-            color = theme['selected'] if is_sel else theme['unselected']
-            self._display.draw_ttf_centered(y, label, color, FONT_DEJAVU, TTF_MEDIUM)
+        with self._lock:
+            self._display.clear(theme['bg'])
+            self._display.draw_ttf_centered(10, "PAUSED", theme['warning'], FONT_DEJAVU, TTF_LARGE)
 
-        self._display.flip()
+            for r, (ll, lv, rl, rv) in enumerate(col_rows):
+                y = start_y + r * row_h
+                for c, (label, value) in enumerate([(ll, lv), (rl, rv)]):
+                    x = col_x[c]
+                    is_sel = (row == r and col == c)
+                    label_color = theme['selected'] if is_sel else theme['unselected']
+
+                    if label in ('Theme:', 'Brightness:', 'Auto Dim:', 'Dim Level:'):
+                        value_color = theme['accent']
+                    else:
+                        value_color = theme['on'] if value == 'ON' else theme['off']
+
+                    label_w = self._display.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
+                    self._display.draw_ttf(x, y, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
+                    self._display.draw_ttf(x + label_w + 6, y, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
+
+            for i, (label, _action) in enumerate(bottom_items):
+                y = bottom_y + i * 22
+                is_sel = (row == 3 + i)
+                color = theme['selected'] if is_sel else theme['unselected']
+                self._display.draw_ttf_centered(y, label, color, FONT_DEJAVU, TTF_MEDIUM)
+
+            self._display.flip()
 
     def _write_next_payload(self, launcher_path):
         """Write the next payload launcher path for payload.sh to pick up"""
@@ -659,18 +662,13 @@ class View:
             logging.warning("Failed to write .next_payload: %s", e)
 
     def _draw_returning_screen(self, message="Returning to menu..."):
-        """Draw transition screen while waiting"""
-        # Set flag to prevent refresh thread from overwriting this screen
         self._returning_to_menu = True
-
         theme = get_menu_theme()
-        self._display.clear(theme['bg'])
-
-        # Center message vertically
-        self._display.draw_ttf_centered(90, message, theme['warning'], FONT_DEJAVU, TTF_LARGE)
-        self._display.draw_ttf_centered(130, "Please wait", theme['dim'], FONT_DEJAVU, TTF_MEDIUM)
-
-        self._display.flip()
+        with self._lock:
+            self._display.clear(theme['bg'])
+            self._display.draw_ttf_centered(90, message, theme['warning'], FONT_DEJAVU, TTF_LARGE)
+            self._display.draw_ttf_centered(130, "Please wait", theme['dim'], FONT_DEJAVU, TTF_MEDIUM)
+            self._display.flip()
 
     def _uptime_handler(self):
         """Dedicated thread to update uptime every second"""
@@ -913,7 +911,7 @@ class View:
                 return
 
             state = self._state
-            changes = state.changes(ignore=self._ignore_changes)
+            changes = state.get_and_clear_changes(ignore=self._ignore_changes)
 
             if force or len(changes):
                 # Get current theme colors
@@ -945,19 +943,19 @@ class View:
                 # Flip buffer to display
                 self._display.flip()
 
-                # Call render callbacks
                 for cb in self._render_cbs:
                     try:
-                        cb(None)  # No canvas in native mode
+                        cb(None)
                     except:
                         pass
 
-                state.reset()
-
     def cleanup(self):
-        """Clean up display"""
         self._refresh_stop = True
         self._uptime_stop = True
-        # Small delay to let threads see the stop flags
-        time.sleep(0.1)
-        self._display.cleanup()
+        if self._refresh_thread and self._refresh_thread.is_alive():
+            self._refresh_thread.join(timeout=2.0)
+        if self._uptime_thread and self._uptime_thread.is_alive():
+            self._uptime_thread.join(timeout=2.0)
+        with self._lock:
+            self._frozen = True
+            self._display.cleanup()

@@ -51,7 +51,6 @@ def iface_channels(ifname):
     """Get supported channels for interface"""
     channels = []
     try:
-        # Try to get phy number
         result = subprocess.run(
             ['iw', ifname, 'info'],
             capture_output=True, text=True, timeout=5
@@ -62,28 +61,124 @@ def iface_channels(ifname):
                 phy_match = line.split()[-1]
                 break
 
-        if phy_match:
+        if phy_match is not None:
             result = subprocess.run(
-                ['iw', f'phy{phy_match}', 'channels'],
+                ['iw', f'phy{phy_match}', 'info'],
                 capture_output=True, text=True, timeout=5
             )
             for line in result.stdout.split('\n'):
-                if 'MHz' in line and 'disabled' not in line.lower():
-                    # Extract channel number from [X]
-                    if '[' in line and ']' in line:
-                        ch = line.split('[')[1].split(']')[0]
-                        try:
-                            channels.append(int(ch))
-                        except:
-                            pass
+                low = line.lower()
+                if 'mhz' in low and 'disabled' not in low and '[' in line and ']' in line:
+                    ch = line.split('[')[1].split(']')[0]
+                    try:
+                        channels.append(int(ch))
+                    except ValueError:
+                        pass
     except Exception as e:
         logging.debug(f"Error getting channels: {e}")
 
-    # Fallback to 2.4GHz channels
     if not channels:
+        logging.warning("iface_channels(%s) found none; defaulting to 2.4GHz only", ifname)
         channels = list(range(1, 12))
 
     return channels
+
+
+BUILTIN_IFACE = 'wlan1mon'
+MK7AC_IFACE = 'wlan2mon'
+
+
+def iface_exists(iface):
+    return os.path.exists('/sys/class/net/%s' % iface)
+
+
+def iface_is_monitor(iface):
+    try:
+        result = subprocess.run(['iw', 'dev', iface, 'info'],
+                                capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 and 'type monitor' in result.stdout
+    except Exception:
+        return False
+
+
+def mk7ac_available():
+    return iface_exists(MK7AC_IFACE) and iface_is_monitor(MK7AC_IFACE)
+
+
+def resolve_interfaces(choice, pmkid=True):
+    choice = (choice or 'auto').strip().lower()
+    have_mk7ac = mk7ac_available()
+    builtin, mk7 = BUILTIN_IFACE, MK7AC_IFACE
+    warning = None
+
+    if choice in ('mk7ac', mk7, 'wlan2'):
+        if have_mk7ac:
+            pineapd = mk7
+            pmkid_if = builtin if iface_exists(builtin) else None
+        else:
+            pineapd = builtin
+            pmkid_if = None
+            warning = 'MK7AC (wlan2mon) not found - using built-in'
+    elif choice in ('builtin', builtin, 'wlan1'):
+        pineapd = builtin
+        pmkid_if = None
+    else:
+        pineapd = builtin
+        pmkid_if = mk7 if have_mk7ac else None
+
+    if not pmkid:
+        pmkid_if = None
+
+    if not iface_exists(pineapd):
+        warning = '%s missing' % pineapd
+
+    return {
+        'pineapd': pineapd,
+        'pmkid': pmkid_if,
+        'have_mk7ac': have_mk7ac,
+        'warning': warning,
+    }
+
+
+def parse_22000_line(line):
+    line = line.strip()
+    if not line.startswith('WPA*'):
+        return None
+    parts = line.split('*')
+    if len(parts) < 6:
+        return None
+    htype = parts[1]
+    ap = parts[3].lower()
+    sta = parts[4].lower()
+    essid = ''
+    try:
+        essid = bytes.fromhex(parts[5]).decode('utf-8', errors='ignore')
+    except ValueError:
+        essid = ''
+    if len(ap) != 12 or len(sta) != 12:
+        return None
+    return {
+        'type': htype,
+        'ap': ':'.join(ap[i:i + 2] for i in range(0, 12, 2)),
+        'sta': ':'.join(sta[i:i + 2] for i in range(0, 12, 2)),
+        'essid': essid,
+        'key': '%s*%s*%s' % (htype, ap, sta),
+    }
+
+
+def scan_handshake_captures(path):
+    captures = {}
+    for f in glob.glob(os.path.join(path, '*.22000')):
+        try:
+            with open(f, 'r', encoding='utf-8', errors='ignore') as fh:
+                for line in fh:
+                    rec = parse_22000_line(line)
+                    if rec:
+                        rec['file'] = f
+                        captures[rec['key']] = rec
+        except Exception:
+            continue
+    return captures
 
 
 class WifiInfo(Enum):
