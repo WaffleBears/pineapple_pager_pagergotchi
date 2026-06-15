@@ -57,9 +57,8 @@ The startup menu provides these options:
 - **Skip captured** - Skip networks already captured (Yes/No; saved between launches)
 - **1-Radio PMKID** - Interleave active PMKID capture when no second radio is attached (Yes/No; saved between launches)
 - **Deauth Scope** - Configure whitelist/blacklist
-- **Privacy** - Toggle display obfuscation (ON/OFF)
 - **Logging** - WiGLE and AP-discovery logging toggles (submenu)
-- **Clear History** - Reset attack tracking for all networks
+- **History and Privacy** - Privacy (display obfuscation) toggle and Clear History (submenu)
 
 ### Interface Selection
 

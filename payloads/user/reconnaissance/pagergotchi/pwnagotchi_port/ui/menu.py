@@ -470,10 +470,6 @@ class StartupMenu:
                 label = "1-Radio PMKID:"
                 value = "Yes" if self.single_pmkid else "No"
                 value_color = theme['on'] if self.single_pmkid else theme['off']
-            elif opt == 'Privacy:':
-                label = "Privacy:"
-                value = "ON" if self.privacy_mode else "OFF"
-                value_color = theme['on'] if self.privacy_mode else theme['off']
 
             if label is not None:
                 label_color = theme['selected'] if i == selected else theme['unselected']
@@ -502,9 +498,8 @@ class StartupMenu:
             'Skip captured:',
             '1-Radio PMKID:',
             'Deauth Scope',
-            'Privacy:',
             'Logging',
-            'Clear History'
+            'History and Privacy'
         ]
 
         self._draw_main_menu(selected, options)
@@ -531,10 +526,6 @@ class StartupMenu:
                     self.single_pmkid = not self.single_pmkid
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif opt == 'Privacy:':
-                    self.privacy_mode = not self.privacy_mode
-                    self._save_toggle_settings()
-                    self._draw_main_menu(selected, options)
             elif btn == 'SELECT':
                 opt = options[selected]
                 if opt == 'Start Pagergotchi':
@@ -553,15 +544,11 @@ class StartupMenu:
                 elif opt == 'Deauth Scope':
                     self.show_deauth_scope_menu()
                     self._draw_main_menu(selected, options)
-                elif opt == 'Privacy:':
-                    self.privacy_mode = not self.privacy_mode
-                    self._save_toggle_settings()
-                    self._draw_main_menu(selected, options)
                 elif opt == 'Logging':
                     self.show_logging_menu()
                     self._draw_main_menu(selected, options)
-                elif opt == 'Clear History':
-                    self.clear_history_confirm()
+                elif opt == 'History and Privacy':
+                    self.show_history_privacy_menu()
                     self._draw_main_menu(selected, options)
             elif btn == 'BACK':
                 if self._show_exit_confirm():
@@ -709,6 +696,57 @@ class StartupMenu:
                         self.wigle_enabled = False
                     self._save_toggle_settings()
                 elif selected == 2 and btn == 'SELECT':
+                    return
+            elif btn == 'BACK':
+                return
+
+    def show_history_privacy_menu(self):
+        """Show History and Privacy submenu"""
+        selected = 0
+        num_options = 3
+
+        while True:
+            theme = get_menu_theme()
+            self.gfx.clear(theme['bg'])
+            self.gfx.draw_ttf_centered(12, "HISTORY & PRIVACY", theme['submenu'], FONT_DEJAVU, TTF_LARGE)
+
+            y = 60
+            label = "Privacy:"
+            value = "ON" if self.privacy_mode else "OFF"
+            label_color = theme['selected'] if selected == 0 else theme['unselected']
+            value_color = theme['on'] if self.privacy_mode else theme['off']
+            label_width = self.gfx.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
+            max_value_width = self.gfx.ttf_width("OFF", FONT_DEJAVU, TTF_MEDIUM)
+            total_width = label_width + 8 + max_value_width
+            start_x = (self.gfx.width - total_width) // 2
+            self.gfx.draw_ttf(start_x, y + 4, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
+            self.gfx.draw_ttf(start_x + label_width + 8, y + 4, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
+            y += 38
+
+            ch_color = theme['selected'] if selected == 1 else theme['unselected']
+            self.gfx.draw_ttf_centered(y + 4, "Clear History", ch_color, FONT_DEJAVU, TTF_MEDIUM)
+            y += 38
+
+            back_color = theme['selected'] if selected == 2 else theme['unselected']
+            self.gfx.draw_ttf_centered(y + 4, "Back", back_color, FONT_DEJAVU, TTF_MEDIUM)
+            self.gfx.flip()
+
+            btn = self._wait_button()
+            if btn == 'UP':
+                selected = (selected - 1) % num_options
+            elif btn == 'DOWN':
+                selected = (selected + 1) % num_options
+            elif btn in ['LEFT', 'RIGHT']:
+                if selected == 0:
+                    self.privacy_mode = not self.privacy_mode
+                    self._save_toggle_settings()
+            elif btn == 'SELECT':
+                if selected == 0:
+                    self.privacy_mode = not self.privacy_mode
+                    self._save_toggle_settings()
+                elif selected == 1:
+                    self.clear_history_confirm()
+                elif selected == 2:
                     return
             elif btn == 'BACK':
                 return
