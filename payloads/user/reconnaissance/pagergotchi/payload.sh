@@ -164,11 +164,12 @@ start_capture_pineapd() {
     /etc/init.d/pineapd stop 2>/dev/null
     killall pineapd 2>/dev/null
     sleep 1
+    mkdir -p /root/loot/Pagergotchi/handshakes
     /usr/sbin/pineapd \
         --recon=true \
         --reconpath /root/recon/ \
         --reconname pager \
-        --handshakepath /root/loot/handshakes/ \
+        --handshakepath /root/loot/Pagergotchi/handshakes/ \
         --handshakes=true \
         --partialhandshakes=true \
         --interface wlan1mon \

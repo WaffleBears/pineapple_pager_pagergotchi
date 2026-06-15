@@ -68,7 +68,9 @@ class Agent(Client, Automata, AsyncAdvertiser):
         self._handshakes = {}
         self._session_handshakes = 0
         self._known_capture_keys = set()
-        self._pineap_handshakes_dir = '/root/loot/handshakes'
+        self._captured_aps = set()
+        self._skip_captured = config['main'].get('skip_captured', True)
+        self._pineap_handshakes_dir = '/root/loot/Pagergotchi/handshakes'
         self._state_lock = threading.RLock()
         self._stop = threading.Event()
         self._loop_ref = None
@@ -176,8 +178,12 @@ class Agent(Client, Automata, AsyncAdvertiser):
             self._view.set('status', warn)
         time.sleep(3)
         self.start_monitor_mode()
-        self._known_capture_keys = set(utils.scan_handshake_captures(self._pineap_handshakes_dir).keys())
-        logging.info("[agent] starting with %d existing captures", len(self._known_capture_keys))
+        utils.convert_raw_captures(self._pineap_handshakes_dir)
+        _caps = utils.scan_handshake_captures(self._pineap_handshakes_dir)
+        self._known_capture_keys = set(_caps.keys())
+        self._captured_aps = {r['ap'].lower() for r in _caps.values() if r.get('crackable')}
+        logging.info("[agent] starting with %d existing captures (%d crackable APs)",
+                     len(self._known_capture_keys), len(self._captured_aps))
         self.start_event_polling()
         self.start_session_fetcher()
         # Start GPS (optional - no error if not available)
@@ -338,6 +344,7 @@ class Agent(Client, Automata, AsyncAdvertiser):
         current_keys = set(captures.keys())
         new_keys = current_keys - self._known_capture_keys
         self._known_capture_keys = current_keys
+        self._captured_aps = {r['ap'].lower() for r in captures.values() if r.get('crackable')}
         new_count = len(new_keys)
 
         if new_count > 0:
@@ -612,19 +619,18 @@ class Agent(Client, Automata, AsyncAdvertiser):
     def restart_module(self, module):
         self.run('%s off; %s on' % (module, module))
 
-    def _has_handshake(self, bssid):
-        b = bssid.lower()
-        with self._state_lock:
-            for key in self._handshakes:
-                if b in key:
-                    return True
-        return False
+    def _is_captured(self, who):
+        if not who:
+            return False
+        return who.lower() in self._captured_aps
 
     def _should_associate(self, who):
-        return not self._has_handshake(who)
+        if self._skip_captured and self._is_captured(who):
+            return False
+        return True
 
     def _should_deauth(self, who):
-        if self._has_handshake(who):
+        if self._skip_captured and self._is_captured(who):
             return False
         with self._state_lock:
             self._history[who] = self._history.get(who, 0) + 1
@@ -773,6 +779,52 @@ class Agent(Client, Automata, AsyncAdvertiser):
         except Exception:
             pass
         self._sleep_with_exit_check(seconds)
+
+    def pin_channel(self, channel, seconds):
+        if seconds <= 0 or not channel:
+            return
+        try:
+            self._ensure_backend().dwell(channel, seconds)
+        except Exception:
+            pass
+
+    def _uncaptured_bssids(self):
+        out = []
+        try:
+            s = self.session()
+            for ap in s['wifi']['aps']:
+                mac = ap.get('mac', '')
+                if mac and not self._is_captured(mac):
+                    out.append(mac)
+        except Exception:
+            pass
+        return out
+
+    def pmkid_sweep(self, seconds):
+        if self._config['main'].get('pmkid_iface'):
+            return
+        if not self._config['main'].get('single_pmkid', True):
+            return
+        if self._exit_requested or getattr(self, '_return_to_menu', False):
+            return
+
+        utils.convert_raw_captures(self._pineap_handshakes_dir)
+        targets = None
+        if self._skip_captured:
+            targets = self._uncaptured_bssids()
+            if not targets:
+                return
+
+        backend = self._ensure_backend()
+        if not backend.pmkid_sweep_start(targets):
+            return
+        self._view.set('status', 'hunting PMKIDs...')
+        self._sleep_with_exit_check(seconds)
+        backend.pmkid_sweep_finish()
+        utils.convert_raw_captures(self._pineap_handshakes_dir)
+        _caps = utils.scan_handshake_captures(self._pineap_handshakes_dir)
+        self._captured_aps = {r['ap'].lower() for r in _caps.values() if r.get('crackable')}
+        self._view.on_normal()
 
     def stop(self):
         logging.info("Stopping agent...")

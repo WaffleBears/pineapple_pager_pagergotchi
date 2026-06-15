@@ -17,7 +17,7 @@ DATA_DIR = os.path.join(PAYLOAD_DIR, 'data')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 
 # Loot directories (standard Pager location for captured data)
-LOOT_DIR = '/root/loot'
+LOOT_DIR = '/root/loot/Pagergotchi'
 WIGLE_DIR = os.path.join(LOOT_DIR, 'wigle')
 AP_LOG_DIR = os.path.join(LOOT_DIR, 'ap_logs')
 
@@ -78,7 +78,6 @@ class APLogger:
         date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         if self._wigle_enabled:
-            # Use /root/loot/wigle for WiGLE files
             if not os.path.exists(self._wigle_dir):
                 try:
                     os.makedirs(self._wigle_dir)
@@ -89,7 +88,6 @@ class APLogger:
             self._init_wigle_file()
             logging.info(f"[APLogger] WiGLE logging to {self._wigle_file}")
         else:
-            # Use /root/loot/ap_logs for normal AP logs
             if not os.path.exists(self._log_dir):
                 try:
                     os.makedirs(self._log_dir)

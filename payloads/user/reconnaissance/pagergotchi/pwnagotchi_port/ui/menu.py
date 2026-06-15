@@ -249,6 +249,8 @@ class StartupMenu:
         self.log_aps_enabled = self.settings.get('log_aps_enabled', False)
         self.deauth_enabled = self.settings.get('deauth_enabled', True)
         self.privacy_mode = self.settings.get('privacy_mode', False)
+        self.skip_captured = self.settings.get('skip_captured', True)
+        self.single_pmkid = self.settings.get('single_pmkid', True)
 
         self.iface_choice = 'auto'
         self._iface_labels = [('auto', 'Auto'), ('builtin', 'Built-in'), ('mk7ac', 'MK7AC')]
@@ -413,6 +415,8 @@ class StartupMenu:
         self.settings['log_aps_enabled'] = self.log_aps_enabled
         self.settings['deauth_enabled'] = self.deauth_enabled
         self.settings['privacy_mode'] = self.privacy_mode
+        self.settings['skip_captured'] = self.skip_captured
+        self.settings['single_pmkid'] = self.single_pmkid
         save_settings(self.settings)
 
         # Update in-memory config
@@ -458,18 +462,18 @@ class StartupMenu:
                 value = self._iface_label()
                 value_color = theme['accent']
                 max_value = "Built-in"
+            elif opt == 'Skip captured:':
+                label = "Skip captured:"
+                value = "Yes" if self.skip_captured else "No"
+                value_color = theme['on'] if self.skip_captured else theme['off']
+            elif opt == '1-Radio PMKID:':
+                label = "1-Radio PMKID:"
+                value = "Yes" if self.single_pmkid else "No"
+                value_color = theme['on'] if self.single_pmkid else theme['off']
             elif opt == 'Privacy:':
                 label = "Privacy:"
                 value = "ON" if self.privacy_mode else "OFF"
                 value_color = theme['on'] if self.privacy_mode else theme['off']
-            elif opt == 'WiGLE:':
-                label = "WiGLE:"
-                value = "Yes" if self.wigle_enabled else "No"
-                value_color = theme['on'] if self.wigle_enabled else theme['off']
-            elif opt == 'Log APs:':
-                label = "Log APs:"
-                value = "Yes" if self.log_aps_enabled else "No"
-                value_color = theme['on'] if self.log_aps_enabled else theme['off']
 
             if label is not None:
                 label_color = theme['selected'] if i == selected else theme['unselected']
@@ -482,7 +486,7 @@ class StartupMenu:
             else:
                 color = theme['selected'] if i == selected else theme['unselected']
                 self.gfx.draw_ttf_centered(y + 6, opt, color, FONT_DEJAVU, TTF_MEDIUM)
-            y += 25
+            y += 20
 
         self.gfx.flip()
 
@@ -495,10 +499,11 @@ class StartupMenu:
         options = [
             'Start Pagergotchi',
             'Interface:',
+            'Skip captured:',
+            '1-Radio PMKID:',
             'Deauth Scope',
             'Privacy:',
-            'WiGLE:',
-            'Log APs:',
+            'Logging',
             'Clear History'
         ]
 
@@ -514,51 +519,48 @@ class StartupMenu:
                 selected = (selected + 1) % len(options)
                 self._draw_main_menu(selected, options)
             elif btn in ['LEFT', 'RIGHT']:
-                if selected == 1:
+                opt = options[selected]
+                if opt == 'Interface:':
                     self._cycle_iface(btn)
                     self._draw_main_menu(selected, options)
-                elif selected == 3:
+                elif opt == 'Skip captured:':
+                    self.skip_captured = not self.skip_captured
+                    self._save_toggle_settings()
+                    self._draw_main_menu(selected, options)
+                elif opt == '1-Radio PMKID:':
+                    self.single_pmkid = not self.single_pmkid
+                    self._save_toggle_settings()
+                    self._draw_main_menu(selected, options)
+                elif opt == 'Privacy:':
                     self.privacy_mode = not self.privacy_mode
-                    self._save_toggle_settings()
-                    self._draw_main_menu(selected, options)
-                elif selected == 4:
-                    self.wigle_enabled = not self.wigle_enabled
-                    if self.wigle_enabled:
-                        self.log_aps_enabled = True
-                    self._save_toggle_settings()
-                    self._draw_main_menu(selected, options)
-                elif selected == 5:
-                    self.log_aps_enabled = not self.log_aps_enabled
-                    if not self.log_aps_enabled:
-                        self.wigle_enabled = False
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
             elif btn == 'SELECT':
-                if selected == 0:
+                opt = options[selected]
+                if opt == 'Start Pagergotchi':
                     return True
-                elif selected == 1:
+                elif opt == 'Interface:':
                     self._cycle_iface('RIGHT')
                     self._draw_main_menu(selected, options)
-                elif selected == 2:
+                elif opt == 'Skip captured:':
+                    self.skip_captured = not self.skip_captured
+                    self._save_toggle_settings()
+                    self._draw_main_menu(selected, options)
+                elif opt == '1-Radio PMKID:':
+                    self.single_pmkid = not self.single_pmkid
+                    self._save_toggle_settings()
+                    self._draw_main_menu(selected, options)
+                elif opt == 'Deauth Scope':
                     self.show_deauth_scope_menu()
                     self._draw_main_menu(selected, options)
-                elif selected == 3:
+                elif opt == 'Privacy:':
                     self.privacy_mode = not self.privacy_mode
                     self._save_toggle_settings()
                     self._draw_main_menu(selected, options)
-                elif selected == 4:
-                    self.wigle_enabled = not self.wigle_enabled
-                    if self.wigle_enabled:
-                        self.log_aps_enabled = True
-                    self._save_toggle_settings()
+                elif opt == 'Logging':
+                    self.show_logging_menu()
                     self._draw_main_menu(selected, options)
-                elif selected == 5:
-                    self.log_aps_enabled = not self.log_aps_enabled
-                    if not self.log_aps_enabled:
-                        self.wigle_enabled = False
-                    self._save_toggle_settings()
-                    self._draw_main_menu(selected, options)
-                elif selected == 6:
+                elif opt == 'Clear History':
                     self.clear_history_confirm()
                     self._draw_main_menu(selected, options)
             elif btn == 'BACK':
@@ -655,6 +657,58 @@ class StartupMenu:
                 elif selected == 2:  # Black List
                     self.show_list_menu('blacklist')
                 elif selected == 3:  # Back
+                    return
+            elif btn == 'BACK':
+                return
+
+    def show_logging_menu(self):
+        """Show Logging submenu with WiGLE and Log APs toggles"""
+        selected = 0
+        num_options = 3
+
+        while True:
+            theme = get_menu_theme()
+            self.gfx.clear(theme['bg'])
+            self.gfx.draw_ttf_centered(12, "LOGGING", theme['submenu'], FONT_DEJAVU, TTF_LARGE)
+
+            y = 60
+            rows = [
+                ('WiGLE:', self.wigle_enabled),
+                ('Log APs:', self.log_aps_enabled),
+            ]
+            for i, (label, on) in enumerate(rows):
+                value = "Yes" if on else "No"
+                label_color = theme['selected'] if selected == i else theme['unselected']
+                value_color = theme['on'] if on else theme['off']
+                label_width = self.gfx.ttf_width(label, FONT_DEJAVU, TTF_MEDIUM)
+                max_value_width = self.gfx.ttf_width("Yes", FONT_DEJAVU, TTF_MEDIUM)
+                total_width = label_width + 8 + max_value_width
+                start_x = (self.gfx.width - total_width) // 2
+                self.gfx.draw_ttf(start_x, y + 4, label, label_color, FONT_DEJAVU, TTF_MEDIUM)
+                self.gfx.draw_ttf(start_x + label_width + 8, y + 4, value, value_color, FONT_DEJAVU, TTF_MEDIUM)
+                y += 38
+
+            back_color = theme['selected'] if selected == 2 else theme['unselected']
+            self.gfx.draw_ttf_centered(y + 4, "Back", back_color, FONT_DEJAVU, TTF_MEDIUM)
+            self.gfx.flip()
+
+            btn = self._wait_button()
+            if btn == 'UP':
+                selected = (selected - 1) % num_options
+            elif btn == 'DOWN':
+                selected = (selected + 1) % num_options
+            elif btn in ['LEFT', 'RIGHT', 'SELECT']:
+                if selected == 0:
+                    self.wigle_enabled = not self.wigle_enabled
+                    if self.wigle_enabled:
+                        self.log_aps_enabled = True
+                    self._save_toggle_settings()
+                elif selected == 1:
+                    self.log_aps_enabled = not self.log_aps_enabled
+                    if not self.log_aps_enabled:
+                        self.wigle_enabled = False
+                    self._save_toggle_settings()
+                elif selected == 2 and btn == 'SELECT':
                     return
             elif btn == 'BACK':
                 return
@@ -971,7 +1025,8 @@ class StartupMenu:
                 selected = 1 - selected
             elif btn == 'SELECT':
                 if selected == 0:
-                    self.save_whitelist([])
+                    self.whitelist = []
+                    self._save_lists()
                     self.gfx.clear(theme['bg'])
                     self.gfx.draw_ttf_centered(100, "Cleared!", theme['on'], FONT_DEJAVU, TTF_LARGE)
                     self.gfx.flip()
@@ -1037,6 +1092,8 @@ def load_settings():
         'blacklist': [],  # List of {ssid, bssid} dicts - target only these
         'wigle_enabled': False,
         'log_aps_enabled': False,
+        'skip_captured': True,
+        'single_pmkid': True,
         'theme': 'Default',  # Theme name: Default, Cyberpunk, Matrix, Synthwave
         'brightness': 100,  # Screen brightness percentage (20-100)
         'auto_dim': 0,  # Auto-dim timeout: 0=Off, 30/60 = seconds

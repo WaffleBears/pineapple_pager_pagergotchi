@@ -8,6 +8,7 @@ import glob
 import os
 import subprocess
 import json
+import threading
 from datetime import datetime
 from enum import Enum
 
@@ -140,6 +141,20 @@ def resolve_interfaces(choice, pmkid=True):
     }
 
 
+def _is_hex(s):
+    if not s:
+        return False
+    try:
+        int(s, 16)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_hash(s, length):
+    return len(s) == length and _is_hex(s) and s.strip('0') != ''
+
+
 def parse_22000_line(line):
     line = line.strip()
     if not line.startswith('WPA*'):
@@ -157,28 +172,93 @@ def parse_22000_line(line):
         essid = ''
     if len(ap) != 12 or len(sta) != 12:
         return None
+    if htype == '01':
+        crackable = _is_hash(parts[2], 32)
+    elif htype == '02':
+        crackable = (_is_hash(parts[2], 32) and len(parts) >= 8
+                     and _is_hash(parts[6], 64) and _is_hex(parts[7]))
+    else:
+        crackable = False
     return {
         'type': htype,
         'ap': ':'.join(ap[i:i + 2] for i in range(0, 12, 2)),
         'sta': ':'.join(sta[i:i + 2] for i in range(0, 12, 2)),
         'essid': essid,
+        'crackable': crackable,
         'key': '%s*%s*%s' % (htype, ap, sta),
     }
 
 
-def scan_handshake_captures(path):
-    captures = {}
-    for f in glob.glob(os.path.join(path, '*.22000')):
-        try:
-            with open(f, 'r', encoding='utf-8', errors='ignore') as fh:
-                for line in fh:
-                    rec = parse_22000_line(line)
-                    if rec:
-                        rec['file'] = f
-                        captures[rec['key']] = rec
-        except Exception:
+def convert_raw_captures(path, limit=250):
+    try:
+        if subprocess.run(['which', 'hcxpcapngtool'],
+                          capture_output=True).returncode != 0:
+            return 0
+    except Exception:
+        return 0
+    converted = 0
+    for p in glob.glob(os.path.join(path, '*.pcap')):
+        if converted >= limit:
+            break
+        target = p[:-len('.pcap')] + '.22000'
+        if os.path.exists(target):
             continue
-    return captures
+        try:
+            subprocess.run(['hcxpcapngtool', '-o', target, p],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
+        if not os.path.exists(target):
+            try:
+                open(target, 'a').close()
+            except Exception:
+                pass
+        converted += 1
+    return converted
+
+
+_scan_cache = {}
+_scan_lock = threading.Lock()
+
+
+def _parse_22000_file(f):
+    records = []
+    try:
+        with open(f, 'r', encoding='utf-8', errors='ignore') as fh:
+            for line in fh:
+                rec = parse_22000_line(line)
+                if rec:
+                    rec['file'] = f
+                    records.append(rec)
+    except Exception:
+        return []
+    return records
+
+
+def scan_handshake_captures(path):
+    with _scan_lock:
+        cache = _scan_cache.setdefault(path, {})
+        captures = {}
+        seen = set()
+        for f in glob.glob(os.path.join(path, '*.22000')):
+            seen.add(f)
+            try:
+                st = os.stat(f)
+                sig = (st.st_mtime, st.st_size)
+            except OSError:
+                continue
+            entry = cache.get(f)
+            if entry and entry[0] == sig:
+                records = entry[1]
+            else:
+                records = _parse_22000_file(f)
+                cache[f] = (sig, records)
+            for rec in records:
+                captures[rec['key']] = rec
+        for f in list(cache.keys()):
+            if f not in seen:
+                del cache[f]
+        return captures
 
 
 class WifiInfo(Enum):

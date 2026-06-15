@@ -10,6 +10,8 @@ A port of [Pwnagotchi](https://github.com/jayofelern/pwnagotchi) for the Hak5 Wi
 - **Active PMKID Capture** - Clientless PMKID via hcxdumptool on a second radio (on by default when available)
 - **Interface Selection** - Choose the capture radio at startup: Auto, Built-in (wlan1mon), or MK7AC (wlan2mon)
 - **Dual-Radio Mode** - With the Hak5 MK7AC attached, runs 4-way capture on the built-in radio and PMKID on the MK7AC at the same time
+- **Skip Captured Networks** - Avoids re-attacking networks already captured with a crackable hash (toggle at startup)
+- **Single-Radio PMKID** - Interleaves an active PMKID sweep into the cycle when no second radio is attached, reaching clientless networks (toggle at startup)
 - **Cute ASCII Pet** - Personality-driven face that reacts to activity
 - **Native Display** - Fast C library rendering via libpagerctl.so (480x222 RGB565)
 - **Non-Blocking Pause Menu** - Two-column settings layout with 2D navigation; attacks continue in background
@@ -52,10 +54,11 @@ The startup menu provides these options:
 
 - **Start Pagergotchi** - Begin automated operation
 - **Interface** - Capture radio: Auto / Built-in / MK7AC (LEFT/RIGHT to cycle; resets to Auto every launch)
+- **Skip captured** - Skip networks already captured (Yes/No; saved between launches)
+- **1-Radio PMKID** - Interleave active PMKID capture when no second radio is attached (Yes/No; saved between launches)
 - **Deauth Scope** - Configure whitelist/blacklist
 - **Privacy** - Toggle display obfuscation (ON/OFF)
-- **WiGLE** - Toggle WiGLE CSV logging (ON/OFF)
-- **Log APs** - Toggle AP discovery logging (ON/OFF)
+- **Logging** - WiGLE and AP-discovery logging toggles (submenu)
 - **Clear History** - Reset attack tracking for all networks
 
 ### Interface Selection
@@ -69,6 +72,20 @@ The **Interface** option chooses which radio drives capture. It always starts at
 | **MK7AC** | MK7AC `wlan2mon` (falls back to built-in if unplugged) | Built-in `wlan1mon` |
 
 PMKID requires a second monitor-capable radio (it cannot share a radio with pineapd), so it runs only when one is free. The Hak5 MK7AC appears automatically as `wlan2mon` when plugged in. If a selected adapter is missing, Pagergotchi shows a warning and falls back to the built-in radio.
+
+### Skip Captured
+
+When **Skip captured** is **Yes** (default), Pagergotchi will not re-attack a network it already holds a usable capture for. A network counts as captured only when its stored `.22000` hash is actually crackable - a valid PMKID (`WPA*01`) or a complete 4-way EAPOL (`WPA*02`). Malformed, zeroed, or incomplete captures do not count, so those networks stay in rotation until a good capture is obtained. The set is rebuilt from `/root/loot/handshakes` at startup and refreshed continuously, so networks captured in previous sessions are skipped immediately. Channels on which every network is already captured are skipped entirely.
+
+Set it to **No** to attack every network each pass regardless of existing captures. This toggle is saved between launches.
+
+### Single-Radio PMKID (1-Radio PMKID)
+
+Active PMKID capture normally needs a second radio (the MK7AC), because hcxdumptool must hold a channel to solicit each AP while pineapd keeps hopping. Without a second radio, clientless networks are otherwise uncapturable (a 4-way handshake needs a client to deauth).
+
+When **1-Radio PMKID** is **Yes** (default) **and no MK7AC is attached**, Pagergotchi interleaves a PMKID sweep into its cycle: after each full attack pass it briefly hands the built-in radio to hcxdumptool (~60 s), harvests PMKIDs, converts them, then returns the radio to pineapd for the next pass. During the sweep there is no 4-way capture or deauth - it is a deliberate trade to reach clientless networks. The sweep targets only networks without a usable capture (unless **Skip captured** is off, in which case it solicits all). When an MK7AC **is** attached this feature stays dormant, since hcxdumptool already runs continuously on the second radio.
+
+This toggle is saved between launches.
 
 ![Clear History](screenshots/clear-history.png)
 
@@ -261,13 +278,13 @@ All settings and configuration stay within the payload directory:
 | `data/.next_payload` | Temporary file for app handoff (auto-deleted) |
 
 ### Loot Directory (captured data)
-Captured data goes to the standard Pager loot location:
+All Pagergotchi output goes under its own folder, `/root/loot/Pagergotchi/`. Other apps and system loot locations are left untouched.
 
 | Path | Contents |
 |------|----------|
-| `/root/loot/handshakes/` | Captured .pcap and .22000 files |
-| `/root/loot/wigle/` | WiGLE CSV exports |
-| `/root/loot/ap_logs/` | AP discovery logs |
+| `/root/loot/Pagergotchi/handshakes/` | Captured .pcap and .22000 files (handshakes + PMKID) |
+| `/root/loot/Pagergotchi/wigle/` | WiGLE CSV exports |
+| `/root/loot/Pagergotchi/ap_logs/` | AP discovery logs |
 
 ## Configuration
 

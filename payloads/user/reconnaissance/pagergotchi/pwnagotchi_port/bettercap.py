@@ -11,7 +11,7 @@ from queue import Queue, Empty
 
 import pwnagotchi_port.utils as utils
 
-HANDSHAKES_DIR = '/root/loot/handshakes'
+HANDSHAKES_DIR = '/root/loot/Pagergotchi/handshakes'
 EXAMINE_SECONDS = 6
 
 
@@ -58,6 +58,11 @@ class PineAPBackend:
         self._hcx_pcap = None
         self._hcx_out = None
 
+        self._sweep_proc = None
+        self._sweep_pcap = None
+        self._sweep_out = None
+        self._sweep_filter = None
+
         self.current_channel = 0
         self.focused_bssid = None
         self.iface_status = ''
@@ -79,9 +84,8 @@ class PineAPBackend:
             return '', str(e), -1
 
     def _seed_known_keys(self):
-        for key in utils.scan_handshake_captures(self.handshakes_dir):
+        for key, rec in utils.scan_handshake_captures(self.handshakes_dir).items():
             self._known_keys.add(key)
-        for rec in utils.scan_handshake_captures(self.handshakes_dir).values():
             if rec['essid'] and rec['ap']:
                 self._learned_essids[rec['ap'].lower()] = rec['essid']
 
@@ -212,6 +216,94 @@ class PineAPBackend:
                 pass
             self._hcx_proc = None
             self._pmkid_convert()
+
+    def pmkid_sweep_start(self, target_bssids=None):
+        iface = self.pineapd_iface
+        if self._run_cmd(['which', 'hcxdumptool'])[2] != 0:
+            return False
+        if not utils.iface_is_monitor(iface):
+            return False
+
+        self._run_cmd(['_pineap', 'EXAMINE', 'CANCEL'])
+        self._run_cmd(['_pineap', 'INTERFACE', 'DISABLE', iface])
+        time.sleep(1)
+
+        ts = int(time.time())
+        self._sweep_pcap = os.path.join(self.handshakes_dir, 'sweep_%d.pcapng' % ts)
+        self._sweep_out = os.path.join(self.handshakes_dir, 'sweep_%d.22000' % ts)
+        self._sweep_filter = None
+
+        base = ['hcxdumptool', '-i', iface, '-w', self._sweep_pcap, '-F']
+        cmd = list(base)
+        if target_bssids:
+            fpath = os.path.join(self.handshakes_dir, '.sweep_targets')
+            try:
+                with open(fpath, 'w') as fh:
+                    for b in target_bssids:
+                        fh.write(b.replace(':', '').lower() + '\n')
+                cmd += ['--filterlist_ap=%s' % fpath, '--filtermode=2']
+                self._sweep_filter = fpath
+            except Exception:
+                self._sweep_filter = None
+
+        if not self._spawn_sweep(cmd):
+            if self._sweep_filter:
+                logging.warning("[PMKID sweep] hcxdumptool would not start with target filter, retrying unfiltered")
+                self._sweep_filter = None
+                if not self._spawn_sweep(base):
+                    self._restore_after_sweep()
+                    return False
+            else:
+                self._restore_after_sweep()
+                return False
+
+        logging.info("[PMKID sweep] active on %s (pid %s, targets=%s)",
+                     iface, self._sweep_proc.pid, len(target_bssids) if target_bssids else 'all')
+        return True
+
+    def _spawn_sweep(self, cmd):
+        try:
+            self._sweep_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            logging.warning("[PMKID sweep] spawn error: %s", e)
+            self._sweep_proc = None
+            return False
+        time.sleep(2)
+        if self._sweep_proc.poll() is not None:
+            self._sweep_proc = None
+            return False
+        return True
+
+    def pmkid_sweep_finish(self):
+        if self._sweep_proc:
+            try:
+                self._sweep_proc.terminate()
+                self._sweep_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._sweep_proc.kill()
+            except Exception:
+                pass
+            self._sweep_proc = None
+        if self._sweep_pcap and os.path.exists(self._sweep_pcap):
+            try:
+                subprocess.run(['hcxpcapngtool', '-o', self._sweep_out, self._sweep_pcap],
+                               capture_output=True, timeout=60)
+            except Exception as e:
+                logging.debug("[PMKID sweep] convert error: %s", e)
+        self._restore_after_sweep()
+
+    def _restore_after_sweep(self):
+        iface = self.pineapd_iface
+        self._run_cmd(['_pineap', 'INTERFACE', 'ENABLE', iface])
+        self._run_cmd(['_pineap', 'INTERFACE', 'SET', iface, 'HOP', 'fast'])
+        self._run_cmd(['_pineap', 'INTERFACE', 'PRIMARY', iface])
+        self._run_cmd(['_pineap', 'INTERFACE', 'INJECT', iface])
+        if self._sweep_filter:
+            try:
+                os.remove(self._sweep_filter)
+            except Exception:
+                pass
+            self._sweep_filter = None
 
     def _recon_loop(self):
         while self.running:

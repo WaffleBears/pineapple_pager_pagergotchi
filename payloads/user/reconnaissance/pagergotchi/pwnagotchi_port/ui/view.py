@@ -176,11 +176,7 @@ class View:
         status_max_chars = available_width // char_width if char_width > 0 else 22
         logging.info(f"[UI] Status wrap: available={available_width}px, char={char_width}px, max_chars={status_max_chars}")
 
-        _iface = config.get('main', {}).get('pineapd_iface', 'wlan1mon')
-        _radio_tag = 'MK7' if _iface == 'wlan2mon' else 'INT'
-        if config.get('main', {}).get('pmkid_iface'):
-            _radio_tag += '+P'
-        self._name_value = '%s [%s]>' % (pwnagotchi.name(), _radio_tag)
+        self._name_value = '%s>' % pwnagotchi.name()
 
         lang = config.get('main', {}).get('lang', 'en')
         self._voice = Voice(lang=lang)

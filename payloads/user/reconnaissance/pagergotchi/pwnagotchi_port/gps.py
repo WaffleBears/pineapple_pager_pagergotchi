@@ -117,6 +117,7 @@ class GPS:
         """Ensure gpsd is running and connected to device (Pager-specific)"""
         import subprocess
 
+        sock = None
         try:
             # Check if gpsd is running and has devices
             import socket
@@ -125,7 +126,6 @@ class GPS:
             sock.connect(('127.0.0.1', 2947))
             sock.send(b'?DEVICES;\n')
             response = sock.recv(1024).decode('utf-8', errors='ignore')
-            sock.close()
 
             # If no devices, restart gpsd
             if '"devices":[]' in response or 'devices":[]' in response:
@@ -142,6 +142,12 @@ class GPS:
                 time.sleep(2)
             except Exception:
                 pass
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
 
     def stop(self):
         """Stop GPS monitoring"""
@@ -184,6 +190,7 @@ class GPS:
         import socket
 
         while self._running:
+            sock = None
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5)
@@ -200,10 +207,14 @@ class GPS:
                     while '\n' in buffer:
                         line, buffer = buffer.split('\n', 1)
                         self._parse_gpsd_json(line)
-
-                sock.close()
             except Exception as e:
                 logging.debug(f"[GPS] gpsd error: {e}")
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
 
             time.sleep(5)  # Retry delay
 

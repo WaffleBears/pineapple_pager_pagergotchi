@@ -193,7 +193,14 @@ def do_auto_mode(agent):
                 if should_exit() or should_return_to_menu():
                     break
 
+                if agent._skip_captured:
+                    aps = [ap for ap in aps if not agent._is_captured(ap.get('mac', ''))]
+                if not aps:
+                    continue
+
                 agent.set_channel(ch)
+                hold = min(120, int(len(aps) * 3 + dwell_time + 5))
+                agent.pin_channel(ch, hold)
                 attacked = False
 
                 for ap in aps:
@@ -218,6 +225,11 @@ def do_auto_mode(agent):
 
                 if attacked and not should_exit() and not should_return_to_menu():
                     agent.dwell(ch, dwell_time)
+
+            if should_exit() or should_return_to_menu():
+                break
+
+            agent.pmkid_sweep(agent._config['main'].get('pmkid_sweep_secs', 60))
 
             if should_exit() or should_return_to_menu():
                 break
@@ -252,6 +264,9 @@ def load_config(config_path=None):
             'pmkid_iface': None,
             'iface_choice': 'auto',
             'pmkid_active': True,
+            'skip_captured': True,
+            'single_pmkid': True,
+            'pmkid_sweep_secs': 60,
             'min_attack_rssi': -85,
             'mon_start_cmd': '',
             'no_restart': True,
@@ -292,7 +307,7 @@ def load_config(config_path=None):
             'port': 8081,
             'username': 'pwnagotchi',
             'password': 'pwnagotchi',
-            'handshakes': '/root/loot/handshakes/pagergotchi',
+            'handshakes': '/root/loot/Pagergotchi/handshakes',
             'silence': ['wifi.client.probe'],
         },
         'ui': {
@@ -311,12 +326,21 @@ def load_config(config_path=None):
 
             if 'capture' in cp:
                 config['main']['iface'] = cp.get('capture', 'interface', fallback='wlan1mon')
-                config['bettercap']['handshakes'] = cp.get('capture', 'output_dir', fallback='/root/loot/handshakes/pagergotchi')
+                config['bettercap']['handshakes'] = cp.get('capture', 'output_dir', fallback='/root/loot/Pagergotchi/handshakes')
 
             if 'channels' in cp:
                 channels_str = cp.get('channels', 'channels', fallback='')
                 if channels_str:
-                    config['personality']['channels'] = [int(c.strip()) for c in channels_str.split(',')]
+                    parsed_channels = []
+                    for c in channels_str.split(','):
+                        c = c.strip()
+                        if not c:
+                            continue
+                        try:
+                            parsed_channels.append(int(c))
+                        except ValueError:
+                            logging.warning("ignoring invalid channel value: %r", c)
+                    config['personality']['channels'] = parsed_channels
 
             if 'whitelist' in cp:
                 ssids = cp.get('whitelist', 'ssids', fallback='')
@@ -379,9 +403,13 @@ def main():
 
         proceed = False
         iface_choice = 'auto'
+        skip_captured = True
+        single_pmkid = True
         try:
             proceed = startup_menu.show_main_menu()
             iface_choice = getattr(startup_menu, 'iface_choice', 'auto')
+            skip_captured = getattr(startup_menu, 'skip_captured', True)
+            single_pmkid = getattr(startup_menu, 'single_pmkid', True)
         finally:
             startup_menu.cleanup()
 
@@ -392,6 +420,8 @@ def main():
         config = load_config(config_path)
         res = utils.resolve_interfaces(iface_choice, config['main'].get('pmkid_active', True))
         config['main']['iface_choice'] = iface_choice
+        config['main']['skip_captured'] = skip_captured
+        config['main']['single_pmkid'] = single_pmkid
         config['main']['pineapd_iface'] = res['pineapd']
         config['main']['pmkid_iface'] = res['pmkid']
         config['main']['iface'] = res['pineapd']
